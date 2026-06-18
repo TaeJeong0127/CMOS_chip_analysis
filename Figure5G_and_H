@@ -1,0 +1,253 @@
+import glob
+import re
+import imageio
+import numpy as np
+import matplotlib.pyplot as plt
+import os
+import h5py
+from scipy import ndimage
+import matplotlib.colors as mcolors
+import matplotlib.cm as cm
+from matplotlib.patches import Rectangle
+import itertools
+from scipy.ndimage import gaussian_filter
+import matplotlib.gridspec as gridspec
+import cv2
+from tifffile import imsave
+from datetime import datetime
+import csv
+import matplotlib.ticker as ticker
+from matplotlib.colors import BoundaryNorm
+from mpl_toolkits.axes_grid1 import make_axes_locatable
+from scipy.ndimage import median_filter, gaussian_filter1d
+from collections import defaultdict
+
+os.environ['HDF5_USE_FILE_LOCKING'] = 'FALSE'
+if __name__ == "__main__":
+    os.chdir(os.path.split(os.path.dirname(__file__))[0])
+plt.rcParams.update(plt.rcParamsDefault)
+plt.rcParams.update({'font.size': 28})
+
+logdir = r"C:\Spheroid_Dataset"
+
+plotdir = os.path.join(logdir, 'plots')
+
+if not os.path.exists(plotdir):
+    os.makedirs(plotdir)
+
+list_datasets = []
+
+virtual_pixel_sizes = [1, 2, 4, 8] 
+
+#~~~ Media Region~~~
+media_row_start, media_row_end = 650, 850
+media_col_start, media_col_end = 420, 520
+
+#~~ ROI ~~~~
+row_start, row_end = 640, 840
+col_start, col_end = 540, 770
+
+# Define the row for the line trace across the images (relative to the ROI)
+line_trace_row_rel = (row_end - row_start) // 2 + 5
+
+target_pixel_1 = 175 
+target_pixel_2 = 135
+
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+output_h5_filename = os.path.join(plotdir, 'spheroid_virtual_pixel_images.h5')
+
+# Define the reference time for elapsed time calculations
+start_timestamp_str = '20250728_162546'
+time_start = datetime.strptime(start_timestamp_str, "%Y%m%d_%H%M%S")
+
+# Read from the HDF5 file with corrected logic for virtual pixels
+allimages = {}
+try:
+    with h5py.File(output_h5_filename, 'r') as hf:
+        for group_name in hf.keys():
+            allimages[group_name] = []
+            group = hf[group_name]
+            
+            # Sort by 'sizing' attribute
+            sorted_datasets_items = sorted(group.items(), key=lambda item: item[1].attrs.get('sizing', -1))
+            if not sorted_datasets_items:
+                continue
+            
+            for dataset_name, dset in sorted_datasets_items:
+                image_data = dset[:]
+                timestamp_str = dset.attrs['timestamp']
+                sizing = dset.attrs.get('sizing', None)
+                current_timestamp = datetime.strptime(timestamp_str, "%Y%m%d_%H%M%S")
+                
+                elapsed = current_timestamp - time_start
+                elapsed_hours = round(elapsed.total_seconds() / 3600.0, 2)
+                
+                allimages[group_name].append({
+                    'image': image_data,
+                    'elapsed_hours': elapsed_hours,
+                    'sizing': sizing
+                })
+except Exception as e:
+    print(f"Error reading HDF5 file, using placeholder data: {e}")
+    # Placeholder data for demonstration if file doesn't exist
+    allimages['Virtual_pixel_size_2'] = []
+    time_points_in_data = [0.1, 8.2, 16.0, 23.9, 32.1, 40.1]
+    for h in time_points_in_data:
+        dummy_image = np.random.rand(500, 500)
+        allimages['Virtual_pixel_size_2'].append({
+            'image': dummy_image,
+            'elapsed_hours': float(h),
+            'sizing': 2
+        })
+
+
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+trace_data = {'sizing':[], f'pixel_{target_pixel_1}':[], f'pixel_{target_pixel_2}':[], 'elapsed_time':[]}
+myframes = []
+
+
+if 1:
+    all_keys = list(allimages.keys())
+    virtual_keys = [k for k in all_keys if k.startswith('Virtual_pixel_size')]
+
+    if not virtual_keys:
+        print("No virtual pixel size categories found. Exiting plotting loop.")
+        exit()
+
+    # Sort keys by sizing (virtual pixel size)
+    virtual_keys_sorted = sorted(virtual_keys, key=lambda k: allimages[k][0]['sizing'])
+
+    size_color_map = {
+        1: 'blue',
+        2: 'green',
+        4: 'red',
+        8: 'magenta',
+    }
+
+    for j in range(len(allimages[virtual_keys_sorted[0]])):
+        
+        line_traces_data = []
+        scaled_line_traces_data = []
+
+        for i, k in enumerate(virtual_keys_sorted):
+            img = allimages[k][j]['image'][row_start:row_end, col_start:col_end]
+            sizing = allimages[k][j]['sizing']
+            
+            #If rotation is needed
+            if 1: 
+                img_roi = np.rot90(img, k=-1)
+          
+
+            # Trace processing
+            line_trace = img_roi[line_trace_row_rel, :]
+            trace_med = median_filter(line_trace, size=3)
+            line_trace_smooth = gaussian_filter1d(trace_med, sigma=2)
+            line_traces_data.append(line_trace_smooth)
+
+            # Media normalization
+            media_roi = allimages[k][j]['image'][media_row_start:media_row_end, media_col_start:media_col_end]
+            media_median = np.median(media_roi)
+            if media_median == 0:
+                print(f"Warning: media median is zero at j={j}, k={k}")
+                media_median = 1.0
+            scaled_trace = line_trace_smooth / media_median
+            scaled_line_traces_data.append(scaled_trace)
+
+            # Define new pixel centers
+            center_1 = target_pixel_1
+            center_2 = target_pixel_2
+            
+            # ~~~ Extract 2x2 region around pixel 155 ~~~
+            pixel_1_values = []
+            for row_offset in [0, 1]:
+                for col_offset in [0, 1]:
+                    row_idx = line_trace_row_rel + row_offset
+                    col_idx = center_1 + col_offset
+                    if row_idx < img_roi.shape[0] and col_idx < img_roi.shape[1]:
+                        pixel_1_values.append(img_roi[row_idx, col_idx] / media_median)
+            
+            # ~~~ Extract 2x2 region around pixel 100 ~~~
+            pixel_2_values = []
+            for row_offset in [0, 1]:
+                for col_offset in [0, 1]:
+                    row_idx = line_trace_row_rel + row_offset
+                    col_idx = center_2 + col_offset
+                    if row_idx < img_roi.shape[0] and col_idx < img_roi.shape[1]:
+                        pixel_2_values.append(img_roi[row_idx, col_idx] / media_median)
+            
+            # Compute the averages
+            mean_1 = np.mean(pixel_1_values) if pixel_1_values else np.nan
+            mean_2 = np.mean(pixel_2_values) if pixel_2_values else np.nan
+            
+            # Store trace data
+            trace_data['sizing'].append(sizing)
+            trace_data['elapsed_time'].append(allimages[k][j]['elapsed_hours'])
+            trace_data[f'pixel_{target_pixel_1}'].append(mean_1)
+            trace_data[f'pixel_{target_pixel_2}'].append(mean_2)
+
+      
+        
+if 1:
+    from collections import defaultdict
+
+    size_color_map = {
+        1: 'blue',
+        2: 'green',
+        4: 'red',
+        8: 'magenta',
+    }
+
+    grouped_data = defaultdict(lambda: {'time': [], f'pixel_{target_pixel_1}': [], f'pixel_{target_pixel_2}': []})
+
+    for i, sizing in enumerate(trace_data['sizing']):
+        grouped_data[sizing]['time'].append(trace_data['elapsed_time'][i])
+        grouped_data[sizing][f'pixel_{target_pixel_1}'].append(trace_data[f'pixel_{target_pixel_1}'][i])
+        grouped_data[sizing][f'pixel_{target_pixel_2}'].append(trace_data[f'pixel_{target_pixel_2}'][i])
+
+    # ---------- Plot for pixel 1 ----------
+    fig1, ax1 = plt.subplots(figsize=(10, 8))
+    ax1.set_xlabel('Elapsed Time (hrs)')
+    ax1.set_ylabel(r"$\frac{\mathrm{Capacitance}}{\mathrm{Capacitance}_{\mathrm{media}}}$")
+    # ax1.set_title(f'Mean Capacitance near Pixel {target_pixel_1}', fontsize=16)
+    # ax1.grid(True)
+    ax1.set_ylim(0.6, 1.6)
+    ax1.set_xlim(0,50)
+
+    for sizing in sorted(grouped_data.keys()):
+        if sizing in size_color_map:
+            time_series = grouped_data[sizing]['time']
+            pixel_series = grouped_data[sizing][f'pixel_{target_pixel_1}']
+            smoothed_pixel_series = gaussian_filter1d(pixel_series, sigma=2)
+            ax1.plot(time_series, smoothed_pixel_series,
+                     color=size_color_map[sizing], label=f'Size = {sizing}', linewidth=2, alpha=0.8)
+
+    # ax1.legend(title='Virtual Pixel Size', fontsize=10, loc='best')
+    fig1.tight_layout()
+    fig1.savefig(os.path.join(plotdir, f'ROI_1_timelapse_pixel_{target_pixel_1}_by_sizing.pdf'))
+    plt.show()
+    plt.close(fig1)
+
+    # ---------- Plot for pixel 2 ----------
+    fig2, ax2 = plt.subplots(figsize=(10, 8))
+    ax2.set_xlabel('Elapsed Time (hrs)')
+    ax2.set_ylabel(r"$\frac{\mathrm{Capacitance}}{\mathrm{Capacitance}_{\mathrm{media}}}$")
+    # ax2.set_title(f'Mean Capacitance near Pixel {target_pixel_2}', fontsize=16)
+    # ax2.grid(True)
+    ax2.set_ylim(0.6, 1.6)
+    ax2.set_xlim(0,50)
+
+    for sizing in sorted(grouped_data.keys()):
+        if sizing in size_color_map:
+            time_series = grouped_data[sizing]['time']
+            pixel_series = grouped_data[sizing][f'pixel_{target_pixel_2}']
+            smoothed_pixel_series = gaussian_filter1d(pixel_series, sigma=2)
+            ax2.plot(time_series, smoothed_pixel_series,
+                     color=size_color_map[sizing], label=f'Size = {sizing}', linewidth=2, alpha=0.8)
+
+    # ax2.legend(title='Virtual Pixel Size', fontsize=10, loc='best')
+    fig2.tight_layout()
+    fig2.savefig(os.path.join(plotdir, f'ROI_1_timelapse_pixel_{target_pixel_2}_by_sizing.pdf'))
+    plt.show()
+    plt.close(fig2)
