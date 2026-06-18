@@ -1,0 +1,221 @@
+
+import os
+import numpy as np
+import matplotlib.pyplot as plt
+import h5py
+
+from datetime import datetime
+import matplotlib.ticker as ticker
+# from mpl_toolkits.axes_grid1.inset_locator import inset_axes  # No longer needed
+plt.rcParams.update(plt.rcParamsDefault)
+plt.rcParams.update({'font.size': 22})
+
+
+# ============================================================
+# Utility functions
+# ============================================================
+
+def add_scalebar(ax, roi_shape, pixel_size=10, bar_fraction=0.2, bar_color='black'):
+    """
+    Draws a horizontal scalebar in the lower-left corner of an image.
+    """
+    h, w = roi_shape
+
+    bar_length_px = int(w * bar_fraction)
+    bar_length_um = bar_length_px * pixel_size
+
+    margin_x = int(w * 0.05)
+    margin_y = int(h * 0.05)
+
+    x_start = margin_x
+    x_end = x_start + bar_length_px
+    y_pos = margin_y
+
+    ax.plot([x_start, x_end], [y_pos, y_pos],
+            color=bar_color, linewidth=4)
+
+    ax.text((x_start + x_end) / 2,
+            y_pos + 0.03 * h,
+            f"{bar_length_um} μm",
+            ha='center', va='bottom',
+            color=bar_color, fontsize=10)
+
+
+def calc_vmin_vmax(img, min_count=5, bins=256):
+    """
+    Robust vmin/vmax estimator based on histogram occupancy.
+    """
+    hist, bin_edges = np.histogram(img, bins=bins)
+    nonzero = np.where(hist > min_count)[0]
+
+    if len(nonzero) == 0:
+        return np.min(img), np.max(img)
+
+    return bin_edges[nonzero[0]], bin_edges[nonzero[-1]]
+
+
+def save_colorbar_only(cmap, vmin, vmax, label, filename):
+    """
+    Create a standalone vertical colorbar with controlled width and ticks/label on left.
+    """
+    fig = plt.figure(figsize=(1, 6))  # overall figure size
+    
+    from matplotlib.cm import ScalarMappable
+    sm = ScalarMappable(cmap=cmap, norm=plt.Normalize(vmin=vmin, vmax=vmax))
+    sm.set_array([])
+
+    # Create a narrow axes for colorbar (left, bottom, width, height)
+    cax = fig.add_axes([0.05, 0.05, 0.18, 0.9])  # width=0.18 is thin
+    
+    cbar = fig.colorbar(sm, cax=cax, orientation='vertical', ticklocation='left')
+    cbar.set_label(label, rotation=90, labelpad=15, va='bottom', ha='center', fontsize = 28)
+    cbar.ax.yaxis.set_tick_params(pad=5)
+    cbar.ax.yaxis.set_major_locator(ticker.MaxNLocator(nbins=4))
+
+    plt.savefig(filename, bbox_inches='tight', dpi=300)
+    plt.close(fig)
+
+
+# ============================================================
+# USER CONFIGURATION
+# ============================================================
+
+logdir = r"C:\Users\Documents\Aug_04_2024"
+plotdir = os.path.join(logdir, "plots")
+os.makedirs(plotdir, exist_ok=True)
+
+output_h5_filename = os.path.join(plotdir, "Supplementary_Fig_S8_capacitance_images.h5")
+
+start_timestamp_str = "20240804_152333"
+target_neighbors = 4
+
+target_timestamps = [
+    "20240804_152829",
+    "20240805_101156",
+    "20240805_164719",
+    "20240806_112801"
+]
+
+# ROI (ensure these are valid for your sensor size)
+roi1_row_start, roi1_row_end = 300, 500
+roi1_col_start, roi1_col_end = 300, 500
+
+# Fixed display limits (as in screenshot)
+vmin, vmax = 38, 70
+
+
+# ============================================================
+# LOAD DATA
+# ============================================================
+
+time_start = datetime.strptime(start_timestamp_str, "%Y%m%d_%H%M%S")
+allimages = {}
+
+with h5py.File(output_h5_filename, "r") as hf:
+    for group_name in hf.keys():
+        group = hf[group_name]
+        allimages[group_name] = []
+
+        for _, dset in group.items():
+            image_data = dset[:]
+            timestamp_str = dset.attrs["timestamp"]
+            neighbors = int(dset.attrs["neighbors"])
+
+            current_timestamp = datetime.strptime(timestamp_str, "%Y%m%d_%H%M%S")
+            elapsed_hours = round(
+                (current_timestamp - time_start).total_seconds() / 3600.0, 2
+            )
+
+            allimages[group_name].append({
+                "image": image_data,
+                "elapsed_hours": elapsed_hours,
+                "neighbors": neighbors,
+                "timestamp": timestamp_str,
+            })
+
+
+# ============================================================
+# SELECT CORRECT GROUP
+# ============================================================
+
+cap_keys = [k for k in allimages if k.startswith("Cap_neighbors")]
+
+chosen_key = None
+for k in cap_keys:
+    if allimages[k] and allimages[k][0]["neighbors"] == target_neighbors:
+        chosen_key = k
+        break
+
+if chosen_key is None:
+    raise RuntimeError(f"No capacitance group with neighbors = {target_neighbors}")
+
+frames = allimages[chosen_key]
+
+# ============================================================
+# GENERATE PDFs (colorbar as separate PDF)
+# ============================================================
+
+filtered_frames = [f for f in frames if f["timestamp"] in target_timestamps]
+n_frames = len(filtered_frames)
+
+for i, frame in enumerate(filtered_frames):
+    timestamp_str = frame["timestamp"]
+    print("MATCHED timestamp:", timestamp_str)
+
+    img_full = frame["image"]
+
+    roi1 = img_full[
+        roi1_row_start:roi1_row_end,
+        roi1_col_start:roi1_col_end
+    ]
+
+    # ---------------------
+    # IMAGE PDF
+    # ---------------------
+
+    fig_img, ax = plt.subplots(figsize=(6, 6))
+    im = ax.imshow(roi1, origin="lower", cmap="Blues_r", vmin=vmin, vmax=vmax)
+    add_scalebar(ax, roi1.shape)
+    ax.axis("off")
+
+    # No embedded colorbar on images anymore
+
+    image_pdf = os.path.join(
+        plotdir,
+        f"Cap_image_{timestamp_str}_neighbors{target_neighbors}.pdf"
+    )
+    fig_img.savefig(image_pdf, dpi=300, bbox_inches='tight', pad_inches=0.1)
+    plt.close(fig_img)
+
+    # Create standalone colorbar PDF only once (after first image)
+    if i == 0:
+        colorbar_pdf = os.path.join(plotdir, 'Capacitance_colorbar.pdf')
+        save_colorbar_only('Blues_r', vmin, vmax, 'Capacitance (fF)', colorbar_pdf)
+
+    # ---------------------
+    # HISTOGRAM PDF
+    # ---------------------
+    fig_hist, axh = plt.subplots(figsize=(4, 4))
+
+    axh.hist(
+        roi1.ravel(),
+        bins=100,
+        color="red",
+        alpha=0.8
+    )
+
+    axh.set_yscale("log")
+    axh.set_xlabel("Capacitance (fF)")
+
+    if i == 0:
+        axh.set_ylabel("Count (No. pixels)")
+
+    axh.set_ylim(1, 3e5)
+    axh.set_xlim(20, 65)
+
+    hist_pdf = os.path.join(
+        plotdir,
+        f"Cap_histogram_{timestamp_str}_neighbors{target_neighbors}.pdf"
+    )
+    fig_hist.savefig(hist_pdf, dpi=300, bbox_inches="tight")
+    plt.close(fig_hist)
