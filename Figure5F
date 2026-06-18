@@ -1,0 +1,170 @@
+import glob
+import re
+import imageio
+import numpy as np
+import matplotlib.pyplot as plt
+import os
+import h5py
+from scipy import ndimage
+import matplotlib.colors as mcolors
+import matplotlib.cm as cm
+from matplotlib.patches import Rectangle
+import itertools
+from scipy.ndimage import gaussian_filter
+import matplotlib.gridspec as gridspec
+import cv2
+from tifffile import imsave
+from datetime import datetime
+import csv
+import matplotlib.ticker as ticker
+from matplotlib.colors import BoundaryNorm
+from mpl_toolkits.axes_grid1 import make_axes_locatable
+from scipy.ndimage import median_filter, gaussian_filter1d
+from collections import defaultdict
+from matplotlib.backends.backend_pdf import PdfPages
+
+os.environ['HDF5_USE_FILE_LOCKING'] = 'FALSE'
+if __name__ == "__main__":
+    os.chdir(os.path.split(os.path.dirname(__file__))[0])
+plt.rcParams.update(plt.rcParamsDefault)
+plt.rcParams.update({'font.size': 22})
+
+
+logdir = r"C:\Spheroid_data"
+plotdir = os.path.join(logdir, 'plots')
+if not os.path.exists(plotdir):
+    os.makedirs(plotdir)
+
+output_h5_filename = os.path.join(plotdir, 'spheroid_virtual_pixel_images.h5')
+
+# Define the reference time for elapsed time calculations
+start_timestamp_str = '20250728_162546'
+time_start = datetime.strptime(start_timestamp_str, "%Y%m%d_%H%M%S")
+
+# Read from the HDF5 file with corrected logic for virtual pixels
+allimages = {}
+try:
+    with h5py.File(output_h5_filename, 'r') as hf:
+        for group_name in hf.keys():
+            allimages[group_name] = []
+            group = hf[group_name]
+            
+            # Sort by 'sizing' attribute
+            sorted_datasets_items = sorted(group.items(), key=lambda item: item[1].attrs.get('sizing', -1))
+            if not sorted_datasets_items:
+                continue
+            
+            for dataset_name, dset in sorted_datasets_items:
+                image_data = dset[:]
+                timestamp_str = dset.attrs['timestamp']
+                sizing = dset.attrs.get('sizing', None)
+                current_timestamp = datetime.strptime(timestamp_str, "%Y%m%d_%H%M%S")
+                
+                elapsed = current_timestamp - time_start
+                elapsed_hours = round(elapsed.total_seconds() / 3600.0, 2)
+                
+                allimages[group_name].append({
+                    'image': image_data,
+                    'elapsed_hours': elapsed_hours,
+                    'sizing': sizing
+                })
+except Exception as e:
+    print(f"Error reading HDF5 file, using placeholder data: {e}")
+    # Placeholder data for demonstration if file doesn't exist
+    allimages['Virtual_pixel_size_2'] = []
+    time_points_in_data = [0.1, 8.2, 16.0, 23.9, 32.1, 40.1]
+    for h in time_points_in_data:
+        dummy_image = np.random.rand(500, 500)
+        allimages['Virtual_pixel_size_2'].append({
+            'image': dummy_image,
+            'elapsed_hours': float(h),
+            'sizing': 2
+        })
+
+
+### Plotting logic for virtual pixel size 2
+# Define ROI and target time points
+
+row_start, row_end = 620, 840
+col_start, col_end = 550, 770
+
+# Fix the target_times variable with the required values
+target_times = [0, 8, 16, 23, 32, 39, 48]
+
+virtual_pixel_size = 2
+
+images_for_plotting = []
+key = f'Virtual_pixel_size_{virtual_pixel_size}'
+
+if key in allimages:
+    # Get all available elapsed times for the target virtual pixel size
+    available_times = [d['elapsed_hours'] for d in allimages[key]]
+    
+    for target_time in target_times:
+        # Find the image with the elapsed time closest to the target time
+        closest_elapsed_time = min(available_times, key=lambda t: abs(t - target_time))
+        closest_image_data = next(d for d in allimages[key] if d['elapsed_hours'] == closest_elapsed_time)
+        closest_image_data['target_time'] = target_time  # Add the target time for title use
+        images_for_plotting.append(closest_image_data)
+
+images_for_plotting.sort(key=lambda x: x['elapsed_hours'])
+
+# Display the times plotted and compare with target
+print(f"Target times: {target_times}")
+print(f"Images to be plotted: {[img['elapsed_hours'] for img in images_for_plotting]}")
+
+# Create the plot with binning logic applied to color scaling
+fig, axes = plt.subplots(1, len(images_for_plotting), figsize=(20, 5))
+if len(images_for_plotting) == 1:
+    axes = [axes]
+
+for ax, img_data in zip(axes, images_for_plotting):
+    img = img_data['image']
+    img_roi = img[row_start:row_end, col_start:col_end]
+
+    # Histogram logic
+    hist, bin_edges = np.histogram(img_roi, bins=256)
+    nonzero_bins = np.where(hist > 5)[0]
+    if len(nonzero_bins) > 0:
+        vmin = bin_edges[nonzero_bins[0]]
+        vmax = bin_edges[nonzero_bins[-1]]
+    else:
+        vmin, vmax = np.min(img_roi), np.max(img_roi)
+
+    # Rotate 90 degrees clockwise (right)
+    img_roi = np.rot90(img_roi, k=-1)  # k=-1 means 90 degrees clockwise
+    # Plot image
+    print('vmin:',vmin)
+    print('vmax:',vmax)
+    im = ax.imshow(img_roi, origin='lower', vmin=vmin, vmax=vmax, cmap='Blues_r')
+
+    # Titles and axis off
+    # ax.set_title(f"t ~ {img_data['target_time']:.0f} hrs")
+    ax.set_xticks([])
+    ax.set_yticks([])
+
+    # Turn off spines and frame
+    for spine in ax.spines.values():
+        spine.set_visible(False)
+        
+    cbar = fig.colorbar(
+        im, 
+        ax=ax, 
+        orientation='horizontal', 
+        pad=0.04, 
+        fraction=0.046, 
+        shrink=0.6,
+        ticks=[vmin, vmax]
+    )
+
+    # Format the tick labels cleanly (e.g., to 2 decimal places)
+    cbar.ax.set_xticklabels([f"{int(vmin)} fF", f"{int(vmax)} fF"], fontsize = 18)
+
+plt.subplots_adjust(wspace=0.1)
+
+# Save to PDF
+pdf_filename = os.path.join(plotdir, 'roi_timelapse_virtual_pixel_4.pdf')
+with PdfPages(pdf_filename) as pdf:
+    pdf.savefig(fig, bbox_inches='tight')
+
+plt.show()
